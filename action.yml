@@ -1,0 +1,88 @@
+name: Rustine security scan
+description: Secrets, risky code and known vulnerabilities of your repository, analysed on the runner. Nothing of your code is sent.
+author: Rustine
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  fail-on:
+    description: "Fail the job at this severity or above: critical, high, medium, low or none."
+    default: high
+  path:
+    description: Folder to analyse, relative to the workspace.
+    default: "."
+  api-key:
+    description: "A Rustine API key (Settings → API keys, from the Solo plan): lifts the limit of 30 known-vulnerability checks an hour. Pass it from a secret."
+    default: ""
+  lang:
+    description: "Language of the report and the annotations: en or fr."
+    default: en
+  sarif:
+    description: "Upload the results to the repository's Security tab (code scanning). Needs `security-events: write`."
+    default: "true"
+  version:
+    description: Version of the rustine CLI to run (an npm version or range).
+    default: "0"
+
+outputs:
+  score:
+    description: The score out of 100.
+    value: ${{ steps.scan.outputs.score }}
+  findings:
+    description: The number of problems found.
+    value: ${{ steps.scan.outputs.findings }}
+  sarif-file:
+    description: Path of the SARIF file written.
+    value: ${{ steps.scan.outputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        RUSTINE_API_KEY: ${{ inputs.api-key }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_LANG: ${{ inputs.lang }}
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+        if [ "$major" -lt 20 ]; then
+          echo "::error::Rustine needs Node.js 20 or later on the runner (actions/setup-node)."
+          exit 2
+        fi
+        out="$RUNNER_TEMP/rustine"
+        mkdir -p "$out"
+        set +e
+        npx --yes "rustine@$INPUT_VERSION" scan "$INPUT_PATH" \
+          --fail-on "$INPUT_FAIL_ON" --lang "$INPUT_LANG" \
+          --sarif "$out/rustine.sarif" --json "$out/rustine.json"
+        code=$?
+        set -e
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        if [ -f "$out/rustine.json" ]; then
+          echo "sarif-file=$out/rustine.sarif" >> "$GITHUB_OUTPUT"
+          node -e 'const r=require(process.argv[1]);console.log(`score=${r.score}`);console.log(`findings=${r.findings.length}`)' \
+            "$out/rustine.json" >> "$GITHUB_OUTPUT"
+        fi
+        # 1 is « problems at the threshold »: the job fails after the upload. 2 is an error.
+        if [ "$code" -ge 2 ]; then exit "$code"; fi
+
+    # Code scanning is free on public repositories; a private one needs GitHub Advanced
+    # Security. Without it the upload fails and the job summary still holds the results.
+    - if: ${{ inputs.sarif == 'true' && steps.scan.outputs.sarif-file != '' }}
+      uses: github/codeql-action/upload-sarif@v4
+      continue-on-error: true
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: rustine
+
+    - if: ${{ steps.scan.outputs.exit-code == '1' }}
+      shell: bash
+      env:
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        echo "::error::Rustine found problems at '$INPUT_FAIL_ON' severity or above. See the job summary."
+        exit 1

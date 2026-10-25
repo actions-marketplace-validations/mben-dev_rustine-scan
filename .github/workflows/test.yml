@@ -1,0 +1,20 @@
+# The public repository mben-dev/rustine-scan tests itself: the action on its own files.
+name: Test
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - id: rustine
+        uses: ./
+        with:
+          fail-on: none
+      - run: test -n "${{ steps.rustine.outputs.score }}"
